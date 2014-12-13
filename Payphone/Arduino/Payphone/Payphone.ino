@@ -38,16 +38,16 @@
 // key pad setup
 const byte rows = 4; //four rows
 const byte cols = 3; //three columns
+char keys[rows][cols] = {
+    {'1','2','3'},
+    {'4','5','6'},
+    {'7','8','9'},
+    {'#','0','*'}
+};
 byte rowPins[rows] = {7, 6, 5, 4}; //connect to the row pinouts of the keypad
 byte colPins[cols] = {10, 9, 8}; //connect to the column pinouts of the keypad
 Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, rows, cols );
  
-char keys[rows][cols] = {
-  {'1','2','3'},
-  {'4','5','6'},
-  {'7','8','9'},
-  {'#','0','*'}
-};
 
 #define RING_START 'R'
 #define RING_STOP 'r'
@@ -55,40 +55,50 @@ char keys[rows][cols] = {
 #define OFF_HOOK 'h'
 #define FOLLOW_KEY 'F'
 
-#define HOOK 2
-#define FOLLOW 3
+#define HOOK 3
+#define FOLLOW 2
 #define RINGER 11
 
-int8_t incomming;
+#define HOOK_TIMEOUT 5
+
+int8_t incoming;
 volatile uint8_t newHookState = 0;
 volatile uint8_t newFollowState = 1;
 uint8_t hookState = 0;
+uint32_t hookTimeOut = 0;
 uint8_t followState = 1;
+
 
 void setup()
 {
+    pinMode(HOOK, INPUT);
+    pinMode(FOLLOW, INPUT);
+    digitalWrite(HOOK, HIGH);
+    digitalWrite(FOLLOW, HIGH);
+    
     Serial.begin(9600);
     
 //    keypad.addEventListener(keypadEvent);  // Add an event listener.
 //    keypad.setHoldTime(500);               // Default is 1000mS
 //    keypad.setDebounceTime(250);           // Default is 50mS
 
-    attacheInterrupt(0, hook, CHANGE);
-    attacheInterrupt(1, follow, CHANGE);
-    
+    attachInterrupt(1, hook, CHANGE);
+    attachInterrupt(0, follow, FALLING);
+
+    Serial.print(digitalRead(HOOK) ? OFF_HOOK : ON_HOOK);
 }
 
 void loop()
 {
-    if (Serial.avaliable()) {
-        incomming = Serial.read();
-        switch (incommming) {
+    if (Serial.available()) {
+        incoming = Serial.read();
+        switch (incoming) {
             case 'R':
                 ringStart();
                 break;
             case 'r':
                 ringStop();
-                break:
+                break;
             default:
                 break;
         }
@@ -103,10 +113,11 @@ void loop()
     if (followState != newFollowState) {
         followState = newFollowState;   
         if (!followState)
-            Serial.print(FOLLOW_KEY):
+            Serial.print(FOLLOW_KEY);
     }
     
-    if (hookState != newHookState) {
+    if (hookState != newHookState && (millis() - hookTimeOut) > HOOK_TIMEOUT) {
+        hookTimeOut = millis();
         hookState = newHookState;
         Serial.print(hookState ? OFF_HOOK : ON_HOOK);
     }    
@@ -114,12 +125,12 @@ void loop()
 
 void hook()
 {
-    newHookState = digitalRead(HOOK);
+        newHookState = digitalRead(HOOK);
 }
 
 void follow()
 {
-    newFollowState = digitalRead(FOLLOW);
+        newFollowState = digitalRead(FOLLOW);
 }
 
 void ringStart()
