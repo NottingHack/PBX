@@ -135,6 +135,15 @@ class PayPhone():
     RUNNING = "RUNNING"
     ERROR = "ERROR"
 
+    _ActionHelp = """
+start = Starts as a background daemon/service
+stop = Stops a daemon/service if running
+restart = Restarts the daemon/service
+status = Check if a PayPhone serveice is running
+If none of the above are given and no daemon/service
+is running then run in the current terminal
+"""
+
     def __init__(self, logger=None):
         """Instantiation
             
