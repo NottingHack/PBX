@@ -73,7 +73,7 @@ class PayPhoneAccountCallback(pj.AccountCallback):
         
     def wait(self):
         self.sem = threading.Semaphore(0)
-        self._phone.logger.info("acCallback: Waitng")
+        self._phone.logger.info("acCallback: Waiting")
         self.sem.acquire()
 
     def on_reg_state(self):
@@ -433,8 +433,21 @@ is running then run in the current terminal
                         self._call.hangup()
                         self.logger.info("Call ended")
 
-                else:
-                    pass
+                if not self.qDial.empty():
+                    try:
+                        digit = self.qDial.get_nowait()
+                    except Queue.Empty():
+                        pass
+                    else:
+                        if self._call:
+                            # send dtmf
+                            self._call.dial_dtmf(digit)
+                            self.logger.info("Sent DTMF {}".format(digit))
+                        elif not self.fHookState.is_set():
+                            # put together dial number
+                            pass
+                        self.qDial.task_done()
+
 #                # process any "Server" messages
 #                if not self.qServer.empty():
 #                    self.logger.debug("Processing Server JSON")
