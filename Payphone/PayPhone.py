@@ -68,7 +68,7 @@ class PayPhoneAccountCallback(pj.AccountCallback):
 
     # Notification on incoming call
     def on_incoming_call(self, call):
-        global current_call 
+        global current_call
         if current_call:
             call.answer(486, "Busy")
             return
@@ -93,7 +93,7 @@ class PayPhoneCallCallback(pj.CallCallback):
         global current_call
         print "Call with", self.call.info().remote_uri,
         print "is", self.call.info().state_text,
-        print "last code =", self.call.info().last_code, 
+        print "last code =", self.call.info().last_code,
         print "(" + self.call.info().last_reason + ")"
         
         if self.call.info().state == pj.CallState.DISCONNECTED:
@@ -113,6 +113,7 @@ class PayPhoneCallCallback(pj.CallCallback):
 
 class PayPhone():
     _configFile = "./PayPhone.cfg"
+    _configSecretFile = "./Secret.cfg"
     _pidFile = None
     _pidFilePath = "./PayPhone.pid"
     _pidFileTimeout = 5
@@ -123,6 +124,11 @@ class PayPhone():
     _serialTimeout = 1     # serial port time out setting
     
     _version = 0.01
+    
+    _lib = None
+    _acc = None
+    _transport = None
+    _call = None
     
     _dailDigits = "1234567890*#"
     _ringStart = 'R'
@@ -146,23 +152,23 @@ is running then run in the current terminal
 
     def __init__(self, logger=None):
         """Instantiation
-            
+
         Setup basic transport, Queue's, Threads etc
         """
         if hasattr(sys,'frozen'): # only when running in py2exe this exists
             self._path = sys.prefix
         else: # otherwise this is a regular python script
             self._path = os.path.dirname(os.path.realpath(__file__))
-        
+
         self._signalMap = {
                            signal.SIGTERM: self._cleanUp,
                            signal.SIGHUP: self.terminate,
                            signal.SIGUSR1: self._reloadProgramConfig,
                           }
-        
-        self.tMainStop = threading.Event()
-#        self.qServer = Queue.Queue()
 
+        self.tMainStop = threading.Event()
+        self.qDial = Queue.Queue()
+    
         # setup initial Logging
         logging.getLogger().setLevel(logging.NOTSET)
         self.logger = logging.getLogger('PayPhone')
@@ -225,7 +231,7 @@ is running then run in the current terminal
     def _checkDaemon(self):
         """ Based on the current os and command line arguments handle running as
             a background daemon or service
-            returns 
+            returns
                 True if we should continue running
                 False if we are done and should exit
         """
@@ -329,7 +335,7 @@ is running then run in the current terminal
 
     def _dstatus(self):
         """ Test the PID file to see if we are running some where
-            Return 
+            Return
                 pid if running
                 None if not
             """
@@ -359,36 +365,41 @@ is running then run in the current terminal
         try:
             self._readConfig()          # read in the config file
             self._initLogging()         # setup the logging options
-#            self._initLCRThread()       # start the LLAPConfigRequest thread
-#            self._initUDPSendThread()   # start the UDP sender
-#            self.tMainStop.wait(1)
             self._initSerialThread()    # start the serial port thread
-#            self.tMainStop.wait(1)
-#            self._initUDPListenThread() # start the UDP listener
+            self.tMainStop.wait(1)
 
-            self._state = self.RUNNING
+            # start up the pjsip stuff
+            try:
+                self._lib = pj.Lib()
+                logConfig = pj.LogConfig(level=3,
+                                         console_level = 3,
+                                         callback=self.pjlog_cb)
+                self._lib.init(log_cfg = logConfig)
+                
+                self._transport = self._lib.create_transport(pj.TransportType.UDP)
+
+                self._lib.start()
+                self.logger.info("PJSIP Library started")
+  
+                acc_cfg = pj.AccountConfig(self.config.get('SIP', 'server'),
+                                           self.config.get('SIP', 'username'),
+                                           self.config.get('SIP', 'secret'))
+
+                print(acc_cfg.id)
+                print(acc_cfg.reg_uri)
+                print(acc_cfg.auth_cred)
+
+                self._acc = self._lib.create_account(acc_cfg, cb=PayPhoneAccountCallback(self))
             
+            except pj.Error, e:
+                self.logger.exception("Failed to setup PJSIP with exception: {}".format(e))
+                self.die()
+            
+            self._state = self.RUNNING
+
             # main thread looks after the server status for us
             while not self.tMainStop.is_set():
                 # check threads are running
-#                if not self.tLCR.is_alive():
-#                    self.logger.error("LCR thread stopped")
-#                    self._state = self.ERROR
-#                    self.tMainStop.wait(1)
-#                    self._startLCR()
-#                    self.tMainStop.wait(1)
-#                    if self.tLCR.is_alive():
-#                        self._state = self.RUNNING
-#            
-#                if not self.tUDPSend.is_alive():
-#                    self.logger.error("UDPSend thread stopped")
-#                    self._state = self.ERROR
-#                    self.tMainStop.wait(1)
-#                    self._startUDPSend()
-#                    self.tMainStop.wait(1)
-#                    if self.tUDPSend.is_alive():
-#                        self._state = self.RUNNING
-#                            
                 if not self.tSerial.is_alive():
                     self.logger.error("Serial thread stopped, wait 1 before trying to re-establish ")
                     self._state = self.ERROR
@@ -402,16 +413,9 @@ is running then run in the current terminal
                         if self._SerialFailCount > self._SerialFailCountLimit:
                             self.logger.error("Serial thread failed to recover after {} retries, Exiting".format(self._SerialFailCountLimit))
                             self.die()
-#
-#                if not self.tUDPListen.is_alive():
-#                    self.logger.error("UDPListen thread stopped")
-#                    self._state = self.ERROR
-#                    self.tMainStop.wait(1)
-#                    self._startUDPListen()
-#                    self.tMainStop.wait(1)
-#                    if self.tUDPSend.is_alive():
-#                        self._state = self.RUNNING
-#                
+
+
+
 #                # process any "Server" messages
 #                if not self.qServer.empty():
 #                    self.logger.debug("Processing Server JSON")
@@ -439,9 +443,12 @@ is running then run in the current terminal
         # load defaults
         try:
             self.config.readfp(open(self._configFile))
+            self.config.read(self._configSecretFile)
+    
         except:
             self.logger.error("Could Not Load Settings File")
-
+            self.die()
+                
         if not self.config.sections():
             self.logger.critical("No Config Loaded, Exiting")
             self.die()
@@ -607,6 +614,18 @@ is running then run in the current terminal
             #set follow on call flag
             pass
     
+    def pjlog_cb(self, level, str, len):
+        self.logger.info(str)
+    
+    def getAccount(self):
+        return self._acc
+    
+    def getCall(self):
+        return self._call
+    
+    def setCall(self, call):
+        self._call = call
+
 # Run Stuff
 ################################################################################
 # Clean up stuff
@@ -651,26 +670,21 @@ is running then run in the current terminal
         # first stop the main thread from try to restart stuff
         self.tMainStop.set()
         # now stop the other threads
-#        try:
-#            self.tUDPListenStop.set()
-#            self.tUDPListen.join()
-#        except:
-#            pass
         try:
             self.tSerialStop.set()
             self.tSerial.join()
         except:
             pass
-#        try:
-#            self.tLCRStop.set()
-#            self.tLCR.join()
-#        except:
-#            pass
-#        try:
-#            self.tUDPSendStop.set()
-#            self.tUDPListen.join()
-#        except:
-#            pass
+        
+        # remove pjsip stuff
+        try:
+            self._transport = None
+            self._acc.delete()
+            self._acc = None
+            self._lib.destroy()
+            self._lib = None
+        except:
+            pass
 
         if not self._background:
             if not sys.platform == 'win32':

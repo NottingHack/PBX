@@ -93,12 +93,15 @@ void loop()
     if (Serial.available()) {
         incoming = Serial.read();
         switch (incoming) {
-            case 'R':
+            case RING_START:
                 ringStart();
                 break;
-            case 'r':
+            case RING_STOP:
                 ringStop();
                 break;
+            case ON_HOOK:
+            case OFF_HOOK:
+                Serial.print(digitalRead(HOOK) ? OFF_HOOK : ON_HOOK);
             default:
                 break;
         }
