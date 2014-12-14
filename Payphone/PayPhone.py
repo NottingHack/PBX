@@ -68,20 +68,19 @@ class PayPhoneAccountCallback(pj.AccountCallback):
 
     # Notification on incoming call
     def on_incoming_call(self, call):
-        global current_call
-        if current_call:
-            call.answer(486, "Busy")
-            return
-            
-        print "Incoming call from ", call.info().remote_uri
-        print "Press 'a' to answer"
+        self._phone.logger.info("acCallback: Incoming call from {}".format(call.info().remote_uri))
+        self._phone.on_incoming_call(call)
+        
+    def wait(self):
+        self.sem = threading.Semaphore(0)
+        self._phone.logger.info("acCallback: Waitng")
+        self.sem.acquire()
 
-        current_call = call
-
-        call_cb = MyCallCallback(current_call)
-        current_call.set_callback(call_cb)
-
-        current_call.answer(180)
+    def on_reg_state(self):
+        if self.sem:
+            if self.account.info().reg_status >= 200:
+                self.sem.release()
+                self._phone.logger.info("acCallback: Account registration successful")
 
 class PayPhoneCallCallback(pj.CallCallback):
     def __init__(self, phone):
@@ -90,15 +89,13 @@ class PayPhoneCallCallback(pj.CallCallback):
 
     # Notification when call state has changed
     def on_state(self):
-        global current_call
-        print "Call with", self.call.info().remote_uri,
-        print "is", self.call.info().state_text,
-        print "last code =", self.call.info().last_code,
-        print "(" + self.call.info().last_reason + ")"
+        self._phone.logger.info("callCallback: Call with {} is {} last code = {} ({})".format(self.call.info().remote_uri,
+                                                                                self.call.info().state_text,
+                                                                                self.call.info().last_code,
+                                                                                self.call.info().last_reason))
         
         if self.call.info().state == pj.CallState.DISCONNECTED:
-            current_call = None
-            print 'Current call is', current_call
+            self._phone.callDisconnected()
 
     # Notification when call's media state has changed.
     def on_media_state(self):
@@ -107,9 +104,12 @@ class PayPhoneCallCallback(pj.CallCallback):
             call_slot = self.call.info().conf_slot
             pj.Lib.instance().conf_connect(call_slot, 0)
             pj.Lib.instance().conf_connect(0, call_slot)
-            print "Media is now active"
+            self._phone.logger.info("callCallback: Media is now active")
         else:
-            print "Media is inactive"
+            self._phone.logger.info("callCallback: Media is inactive")
+
+    def on_dtmf_digit(self, digits):
+        self._phone.logger.info("callCallback: Recived DTMF: {}".format(digits))
 
 class PayPhone():
     _configFile = "./PayPhone.cfg"
@@ -131,11 +131,11 @@ class PayPhone():
     _call = None
     
     _dailDigits = "1234567890*#"
-    _ringStart = 'R'
-    _ringStop = 'r'
-    _onHook = 'H'
-    _offHook = 'h'
-    _followKey = 'F'
+    _ringStartCommand = "R"
+    _ringStopCommand = "r"
+    _onHookKey = "H"
+    _offHookKey = "h"
+    _followKey = "F"
     
     _state = ""
     RUNNING = "RUNNING"
@@ -168,6 +168,10 @@ is running then run in the current terminal
 
         self.tMainStop = threading.Event()
         self.qDial = Queue.Queue()
+        
+        self.fHookState = threading.Event()
+        self.fRingState = threading.Event()
+        self.fFollowSate = threading.Event()
     
         # setup initial Logging
         logging.getLogger().setLevel(logging.NOTSET)
@@ -385,15 +389,18 @@ is running then run in the current terminal
                                            self.config.get('SIP', 'username'),
                                            self.config.get('SIP', 'secret'))
 
-                print(acc_cfg.id)
-                print(acc_cfg.reg_uri)
-                print(acc_cfg.auth_cred)
-
-                self._acc = self._lib.create_account(acc_cfg, cb=PayPhoneAccountCallback(self))
+                self._accCallback = PayPhoneAccountCallback(self)
+                self._acc = self._lib.create_account(acc_cfg, cb=self._accCallback)
+                self._accCallback.wait();
             
             except pj.Error, e:
                 self.logger.exception("Failed to setup PJSIP with exception: {}".format(e))
                 self.die()
+
+            try:
+                self.qSerialOut.put_nowait(self._onHookKey)
+            except Queue.Full:
+                self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
             
             self._state = self.RUNNING
 
@@ -414,8 +421,20 @@ is running then run in the current terminal
                             self.logger.error("Serial thread failed to recover after {} retries, Exiting".format(self._SerialFailCountLimit))
                             self.die()
 
+                if self._call:
+                    #in a call
+                    if self._call.info().state == 3 and not self.fHookState.is_set():
+                        # answere the call
+                        self._ringStop()
+                        self._call.answer(200)
+                        self.logger.info("Call answered")
+                    elif self._call.info().state == 5 and self.fHookState.is_set():
+                        # end call we hung up
+                        self._call.hangup()
+                        self.logger.info("Call ended")
 
-
+                else:
+                    pass
 #                # process any "Server" messages
 #                if not self.qServer.empty():
 #                    self.logger.debug("Processing Server JSON")
@@ -516,7 +535,6 @@ is running then run in the current terminal
         
         # setup queue
         self.qSerialOut = Queue.Queue()
-        self.qSerialToQuery = Queue.Queue()
         
         # setup thread
         self.tSerialStop = threading.Event()
@@ -536,8 +554,7 @@ is running then run in the current terminal
         """ Serial Thread
         """
         self.logger.info("tSerial: Serial thread started")
-        self._SerialToQueryState = 0
-        self._SerialToQuery = []
+ 
         self.tSerialStop.wait(1)
         try:
             while (not self.tSerialStop.is_set()):
@@ -570,14 +587,14 @@ is running then run in the current terminal
                             self._serial.write(msg)
                         except Queue.Empty:
                             self.logger.debug("tSerial: failed to get item from queue")
-                        except Serial.SerialException, e:
+                        except serial.SerialException, e:
                             self.logger.warn("tSerial: failed to write to the serial port {}: {}".format(self._serial.port, e))
                         else:
                              self.logger.debug("tSerial: TX:{}".format(msg))
                              self.qSerialOut.task_done()
                 
                     # sleep for a little
-                    if self._SerialToQueryState or self._serial.inWaiting():
+                    if self._serial.inWaiting():
                         self.tSerialStop.wait(0.01)
                     else:
                         self.tSerialStop.wait(0.1)
@@ -604,15 +621,18 @@ is running then run in the current terminal
             except Queue.Full:
                 self.logger.warn("tSerial: Failed to put {} on qDial at its Full".format(char))
             return
-        if char == self._onHook:
+        if char == self._onHookKey:
             # set on Hook Flag
-            pass
-        if char == self._offHook:
+            self.fHookState.set()
+            self.logger.info("tSerial: Phone on hook")
+        if char == self._offHookKey:
             # set off Hook Flag
-            pass
+            self.fHookState.clear()
+            self.logger.info("tSerial: Phone off hook")
         if char == self._followKey:
             #set follow on call flag
-            pass
+            self.fFollowSate.set()
+            self.logger.info("tSerial: Follow key Pressed")
     
     def pjlog_cb(self, level, str, len):
         self.logger.info(str)
@@ -625,6 +645,43 @@ is running then run in the current terminal
     
     def setCall(self, call):
         self._call = call
+    
+    def on_incoming_call(self, call):
+        if self._call:
+            self.logger.info("Rejected Busy")
+            call.answer(486, "Busy")
+            return
+        
+        self._call = call
+        
+        call_cb = PayPhoneCallCallback(self)
+        self._call.set_callback(call_cb)
+
+        self._call.answer(180)
+        self._ringStart()
+            
+    def _ringStart(self):
+        self.logger.info("Ringing Started")
+        try:
+            self.qSerialOut.put_nowait(self._ringStartCommand);
+            self.fRingState.set()
+        except Queue.Full:
+            self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
+
+    def _ringStop(self):
+        self.logger.info("Ringing Stop")
+        try:
+            self.qSerialOut.put_nowait(self._ringStopCommand);
+            self.fRingState.clear()
+        except Queue.Full:
+            self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
+
+    def callDisconnected(self):
+        self.logger.info("Current call disconnected")
+        if self.fRingState.is_set():
+            self._ringStop()
+        self._call = None
+
 
 # Run Stuff
 ################################################################################
