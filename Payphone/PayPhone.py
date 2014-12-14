@@ -375,10 +375,14 @@ is running then run in the current terminal
             # start up the pjsip stuff
             try:
                 self._lib = pj.Lib()
+                mediaConfig = pj.MediaConfig()
+                if not sys.platform == 'darwin':
+                    mediaConfig.clock_rate = 44100
+                
                 logConfig = pj.LogConfig(level=3,
                                          console_level = 3,
                                          callback=self.pjlog_cb)
-                self._lib.init(log_cfg = logConfig)
+                self._lib.init(log_cfg = logConfig, media_cfg = mediaConfig)
                 
                 self._transport = self._lib.create_transport(pj.TransportType.UDP)
 
@@ -393,6 +397,9 @@ is running then run in the current terminal
                 self._acc = self._lib.create_account(acc_cfg, cb=self._accCallback)
                 self._accCallback.wait();
             
+                if sys.platform == 'darwin':
+                    self._lib.set_snd_dev(1, 3)
+
             except pj.Error, e:
                 self.logger.exception("Failed to setup PJSIP with exception: {}".format(e))
                 self.die()
@@ -748,6 +755,7 @@ is running then run in the current terminal
         
         # remove pjsip stuff
         try:
+            self.hangup_all()
             self._transport = None
             self._acc.delete()
             self._acc = None
