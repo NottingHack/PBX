@@ -136,6 +136,9 @@ class PayPhone():
     _onHookKey = "H"
     _offHookKey = "h"
     _followKey = "F"
+    _dailingLastTime = None
+    _dailingTimeout = 1
+    _digits = None
     
     _state = ""
     RUNNING = "RUNNING"
@@ -172,6 +175,8 @@ is running then run in the current terminal
         self.fHookState = threading.Event()
         self.fRingState = threading.Event()
         self.fFollowSate = threading.Event()
+        self.fDialing = threading.Event()
+        self.fQutgoing = threading.Event()
     
         # setup initial Logging
         logging.getLogger().setLevel(logging.NOTSET)
@@ -397,8 +402,8 @@ is running then run in the current terminal
                 self._acc = self._lib.create_account(acc_cfg, cb=self._accCallback)
                 self._accCallback.wait();
             
-                if sys.platform == 'darwin':
-                    self._lib.set_snd_dev(1, 3)
+#                if sys.platform == 'darwin':
+#                    self._lib.set_snd_dev(1, 3)
 
             except pj.Error, e:
                 self.logger.exception("Failed to setup PJSIP with exception: {}".format(e))
@@ -430,7 +435,7 @@ is running then run in the current terminal
 
                 if self._call:
                     #in a call
-                    if self._call.info().state == 3 and not self.fHookState.is_set():
+                    if self._call.info().state == 3 and not self.fHookState.is_set() and not self.fQutgoing.is_set():
                         # answere the call
                         self._ringStop()
                         self._call.answer(200)
@@ -443,7 +448,7 @@ is running then run in the current terminal
                 if not self.qDial.empty():
                     try:
                         digit = self.qDial.get_nowait()
-                    except Queue.Empty():
+                    except Queue.Empty:
                         pass
                     else:
                         if self._call:
@@ -452,19 +457,25 @@ is running then run in the current terminal
                             self.logger.info("Sent DTMF {}".format(digit))
                         elif not self.fHookState.is_set():
                             # put together dial number
-                            pass
+                            self._dailingLastTime = time()
+                            if self.fDialing.is_set():
+                                # append a digit
+                                self._digits += digit
+                            else:
+                                # start building a number to dial
+                                self.logger.info("Starting Dail sequence")
+                                self._digits = digit
+                                self.fDialing.set()
                         self.qDial.task_done()
-
-#                # process any "Server" messages
-#                if not self.qServer.empty():
-#                    self.logger.debug("Processing Server JSON")
-#                    try:
-#                        self.qServer.get_nowait()
-#                    except Queue.Empty():
-#                        pass
-#                    else:
-#                        self.qUDPSend.put(json.dumps({"type": "Server", "state": self._state}))
-                
+                            
+                if self.fDialing.is_set():
+                    if self.fHookState.is_set():
+                        self.logger.info("Dailing cancled")
+                        self.fDialing.clear()
+                        self._digits = None
+                    if (time() - self._dailingLastTime) > self._dailingTimeout:
+                        #dialing timed out lets make a call
+                        self._makeCall()
                 self.tMainStop.wait(0.5)
 
         except KeyboardInterrupt:
@@ -681,20 +692,22 @@ is running then run in the current terminal
         self._ringStart()
             
     def _ringStart(self):
-        self.logger.info("Ringing Started")
-        try:
-            self.qSerialOut.put_nowait(self._ringStartCommand);
-            self.fRingState.set()
-        except Queue.Full:
-            self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
+        if not self.fRingState.is_set():
+            self.logger.info("Ringing Started")
+            try:
+                self.qSerialOut.put_nowait(self._ringStartCommand);
+                self.fRingState.set()
+            except Queue.Full:
+                self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
 
     def _ringStop(self):
-        self.logger.info("Ringing Stop")
-        try:
-            self.qSerialOut.put_nowait(self._ringStopCommand);
-            self.fRingState.clear()
-        except Queue.Full:
-            self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
+        if self.fRingState.is_set():
+            self.logger.info("Ringing Stop")
+            try:
+                self.qSerialOut.put_nowait(self._ringStopCommand);
+                self.fRingState.clear()
+            except Queue.Full:
+                self.logger.warn("Failed to put {} on qSerialOut at its Full".format(char))
 
     def callDisconnected(self):
         self.logger.info("Current call disconnected")
@@ -702,6 +715,18 @@ is running then run in the current terminal
             self._ringStop()
         self._call = None
 
+    def _makeCall(self):
+        self.logger.info("Making call to {}".format(self._digits))
+        self.fDialing.clear()
+        self.fQutgoing.set()
+        uri = "sip:{}@{}".format(self._digits, self.config.get('SIP', 'server'))
+        self._digits = None
+        lck = lib.auto_lock()
+        try:
+            self._call = self._acc.make_call(uri, cb=PayPhoneCallCallback(self))
+        except pj.Error, e:
+            self.logger.exception("Exception when making call {}".format(e))
+        del lck
 
 # Run Stuff
 ################################################################################
