@@ -42,7 +42,7 @@ char keys[rows][cols] = {
     {'1','2','3'},
     {'4','5','6'},
     {'7','8','9'},
-    {'#','0','*'}
+    {'*','0','#'}
 };
 byte rowPins[rows] = {7, 6, 5, 4}; //connect to the row pinouts of the keypad
 byte colPins[cols] = {10, 9, 8}; //connect to the column pinouts of the keypad
