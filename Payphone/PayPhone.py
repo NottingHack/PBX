@@ -176,7 +176,7 @@ is running then run in the current terminal
         self.fRingState = threading.Event()
         self.fFollowSate = threading.Event()
         self.fDialing = threading.Event()
-        self.fQutgoing = threading.Event()
+        self.fOutgoing = threading.Event()
     
         # setup initial Logging
         logging.getLogger().setLevel(logging.NOTSET)
@@ -435,7 +435,7 @@ is running then run in the current terminal
 
                 if self._call:
                     #in a call
-                    if self._call.info().state == 3 and not self.fHookState.is_set() and not self.fQutgoing.is_set():
+                    if self._call.info().state == 3 and not self.fHookState.is_set() and not self.fOutgoing.is_set():
                         # answere the call
                         self._ringStop()
                         self._call.answer(200)
@@ -443,6 +443,7 @@ is running then run in the current terminal
                     elif self._call.info().state == 5 and self.fHookState.is_set():
                         # end call we hung up
                         self._call.hangup()
+                        self.fOutgoing.clear()
                         self.logger.info("Call ended")
 
                 if not self.qDial.empty():
@@ -713,15 +714,16 @@ is running then run in the current terminal
         self.logger.info("Current call disconnected")
         if self.fRingState.is_set():
             self._ringStop()
+        self.fOutgoing.clear()
         self._call = None
 
     def _makeCall(self):
         self.logger.info("Making call to {}".format(self._digits))
         self.fDialing.clear()
-        self.fQutgoing.set()
+        self.fOutgoing.set()
         uri = "sip:{}@{}".format(self._digits, self.config.get('SIP', 'server'))
         self._digits = None
-        lck = lib.auto_lock()
+        lck = self._lib.auto_lock()
         try:
             self._call = self._acc.make_call(uri, cb=PayPhoneCallCallback(self))
         except pj.Error, e:
