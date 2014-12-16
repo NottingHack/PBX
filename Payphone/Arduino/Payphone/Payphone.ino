@@ -60,6 +60,9 @@ Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, rows, cols );
 #define RINGER 11
 
 #define HOOK_TIMEOUT 5
+#define RING_ON_TIME 400
+#define RING_OFF_TIME 200
+
 
 int8_t incoming;
 volatile uint8_t newHookState = 0;
@@ -67,6 +70,9 @@ volatile uint8_t newFollowState = 1;
 uint8_t hookState = 0;
 uint32_t hookTimeOut = 0;
 uint8_t followState = 1;
+uint8_t ringingState = 0;
+uint32_t ringingTimmer = 0;
+uint8_t ringingStage = 0;
 
 
 void setup()
@@ -123,7 +129,30 @@ void loop()
         hookTimeOut = millis();
         hookState = newHookState;
         Serial.print(hookState ? OFF_HOOK : ON_HOOK);
-    }    
+    }
+    
+    if (ringingState) {
+        switch (ringingState) {
+            case 1:
+                if ((millis() - ringingTimmer) > RING_ON_TIME) {
+                    ringingTimmer = millis();
+                    analogWrite(RINGER, 0);
+                    ringingState = 0;
+                }
+                break;
+                
+            case 0:
+                if ((millis() - ringingTimmer) > RING_OFF_TIME) {
+                    ringingTimmer = millis();
+                    analogWrite(RINGER, 128);
+                    ringingState = 1;
+                }
+                break;
+                
+            default:
+                break;
+        }
+    }
 }
 
 void hook()
@@ -138,39 +167,14 @@ void follow()
 
 void ringStart()
 {
+    ringingState = true;
+    ringingTimmer = millis();
     analogWrite(RINGER,128);
+    ringingStage = 1;
 }
 
 void ringStop()
 {
+    ringingState = false;
     analogWrite(RINGER, 0);
 }
-
-
-/*
-void keypadEvent(KeypadEvent key){
-  switch (keypad.getState()){
-    case PRESSED:
-      switch (key){
-        case '#': digitalWrite(ledPin,!digitalRead(ledPin)); break;
-        case '*': 
-          digitalWrite(ledPin,!digitalRead(ledPin));
-        break;
-      }
-      break;
-    case RELEASED:
-      switch (key){
-        case '*': 
-          digitalWrite(ledPin,!digitalRead(ledPin));
-          blink = false;
-        break;
-      }
-      break;
-    case HOLD:
-      switch (key){
-        case '*': blink = true; break;
-      }
-      break;
-  }
-}
-*/
